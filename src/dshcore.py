@@ -7,6 +7,7 @@ UI 层（dsh_switch.pyw）只做表单与线程调度，所有服务器操作走
 配置来源：exe/脚本同目录的 dsh-switch.json，由程序表单自动生成，
          不需要用户手动编辑。**默认不含任何服务器信息。**
 """
+import base64
 import json
 import os
 import re
@@ -36,7 +37,13 @@ DEFAULT_CONFIG = {
 
 
 def config_path():
-    """配置文件路径：exe/脚本同目录 dsh-switch.json。"""
+    """加密配置文件路径：exe/脚本同目录 dsh-switch.dat（机器绑定的密文）。"""
+    base = os.path.dirname(os.path.abspath(sys_arg0()))
+    return os.path.join(base, "dsh-switch.dat")
+
+
+def legacy_config_path():
+    """v1.0.x 明文 json 的旧路径，用于一次性迁移。"""
     base = os.path.dirname(os.path.abspath(sys_arg0()))
     return os.path.join(base, "dsh-switch.json")
 
@@ -46,28 +53,93 @@ def sys_arg0():
     return sys.argv[0]
 
 
-def load_config():
-    """读配置；缺的字段用默认值补齐；兼容旧版字段名（local_port/remote_port -> port）。"""
-    cfg = dict(DEFAULT_CONFIG)
+# ---- 机器绑定加密 -----------------------------------------------------------
+# 特征码 = Windows MachineGuid + 主机名，SHA256 派生 Fernet 密钥。
+# 配置密文拷到别的机器（或重装系统后 MachineGuid 变化）都解不开 ->
+# 判定来自其他机器，自动删除密文并恢复出厂空白，实现「配置不出本机」。
+last_config_reset = None  # 非空 = 本次启动因特征码不匹配而重置了配置
+
+
+def machine_fingerprint():
+    """取本机特征码字符串。非 Windows 环境退化为 仅主机名。"""
+    guid = ""
     try:
-        with open(config_path(), "r", encoding="utf-8") as f:
-            old = json.load(f)
-        # 旧版本字段迁移
-        if "port" not in old:
-            old["port"] = old.get("local_port") or old.get("remote_port") or 3080
-        cfg.update({k: v for k, v in old.items() if k in cfg})
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                            r"SOFTWARE\Microsoft\Cryptography") as k:
+            guid, _ = winreg.QueryValueEx(k, "MachineGuid")
     except Exception:
         pass
+    try:
+        import socket
+        host = socket.gethostname()
+    except Exception:
+        host = ""
+    return "{}|{}".format(guid, host)
+
+
+def _config_key():
+    """由特征码派生 Fernet 密钥（cryptography 已随 paramiko 打包）。"""
+    import hashlib
+    from cryptography.fernet import Fernet
+    digest = hashlib.sha256(
+        ("dsh-switch:v1:" + machine_fingerprint()).encode("utf-8")).digest()
+    return Fernet(base64.urlsafe_b64encode(digest))
+
+
+def load_config():
+    """读配置：优先加载机器加密的 dsh-switch.dat；
+    解密失败（换了机器/重装系统）-> 删除密文恢复出厂；
+    发现旧版明文 dsh-switch.json -> 自动迁移为加密 dat 并删除明文。"""
+    global last_config_reset
+    cfg = dict(DEFAULT_CONFIG)
+
+    dat = config_path()
+    if os.path.exists(dat):
+        try:
+            with open(dat, "r", encoding="utf-8") as f:
+                old = json.loads(_config_key().decrypt(f.read().encode("utf-8")))
+            if "port" not in old:
+                old["port"] = old.get("local_port") or old.get("remote_port") or 3080
+            cfg.update({k: v for k, v in old.items() if k in cfg})
+            return cfg
+        except Exception:
+            # 特征码不匹配或文件损坏：按约定清空重置
+            try:
+                os.remove(dat)
+            except Exception:
+                pass
+            last_config_reset = ("检测到配置来自其他机器（或系统特征已变化），"
+                                 "已自动重置为本机空白配置")
+            return cfg
+
+    # 旧版明文 json 迁移（存在即转换；转换失败则忽略）
+    legacy = legacy_config_path()
+    if os.path.exists(legacy):
+        try:
+            with open(legacy, "r", encoding="utf-8") as f:
+                old = json.load(f)
+            if "port" not in old:
+                old["port"] = old.get("local_port") or old.get("remote_port") or 3080
+            cfg.update({k: v for k, v in old.items() if k in cfg})
+            save_config(cfg)          # 写加密 dat
+            os.remove(legacy)         # 删除明文
+            log("已将明文配置迁移为机器加密存储（dsh-switch.dat）")
+        except Exception:
+            pass
     return cfg
 
 
 def save_config(cfg):
-    """写配置。密码仅在 remember_password=True 时落盘，否则置空保存。"""
+    """写配置：Fernet 加密后存 dsh-switch.dat。
+    密码仅在 remember_password=True 时写入（密文同样受机器绑定保护）。"""
     out = dict(cfg)
     if not out.get("remember_password"):
         out["password"] = ""
-    with open(config_path(), "w", encoding="utf-8") as f:
-        json.dump(out, f, ensure_ascii=False, indent=2)
+    blob = _config_key().encrypt(
+        json.dumps(out, ensure_ascii=False).encode("utf-8"))
+    with open(config_path(), "wb") as f:
+        f.write(blob)
 
 
 def resource_path(name):

@@ -73,6 +73,9 @@ class App(tk.Tk):
     def __init__(self):
         tk.Tk.__init__(self)
         self.cfg = core.load_config()
+        # 配置被机器特征码判定为「来自其他机器」而重置时，明确告知用户
+        if core.last_config_reset:
+            messagebox.showwarning("dsh-switch", core.last_config_reset, parent=self)
         self.ctl = core.ServerCtl(self.cfg)
         self.tunnel = core.Tunnel(self.cfg)
         self.deployer = core.Deployer(self.cfg, self.ctl)
