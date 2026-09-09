@@ -1,0 +1,19 @@
+# 凭据与本地配置（绝不入库）
+dsh-switch.json
+*.json.bak
+
+# Python
+__pycache__/
+*.pyc
+venv*/
+.venv/
+
+# PyInstaller 构建产物
+build/
+dist/
+*.spec
+
+# 其他
+.DS_Store
+Thumbs.db
+dsh-switch.exe
