@@ -406,14 +406,24 @@ class App(tk.Tk):
 
         self._draw_dot(self.dot_container, "gray")
         self._draw_dot(self.dot_tunnel, "gray")
+        # 容器状态决定隧道/打开按钮可用性（首次巡检前不可用）
+        self._container_online = False
+        self._container_healthy = False
+        self.btn_tunnel.configure(state="disabled")
+        self.btn_open.configure(state="disabled")
 
     def container_action(self, action):
-        """启动/停止容器（后台线程，完成后立即刷新状态）。"""
+        """启动/停止容器（后台线程，完成后立即刷新状态）。
+        停止容器时联动关闭隧道（隧道依赖容器内的 dsh，留着没有意义）。"""
         core.log("{}容器 {}...".format("启动" if action == "start" else "停止",
-                                  self.cfg["container"]))
+                                       self.cfg["container"]))
         def worker():
             ok, out = self.ctl.container_action(action)
             core.log("{}：{}".format("完成" if ok else "失败", out or "(无输出)"))
+            if action == "stop" and ok and self.tunnel.is_up:
+                self.tunnel.stop()
+                core.log("隧道已随容器停止而关闭")
+                self.after(0, self._refresh_tunnel_dot)
             self.after(0, self.poll_now)
         threading.Thread(target=worker, daemon=True).start()
 
@@ -448,11 +458,32 @@ class App(tk.Tk):
         st = self.ctl.container_status()
         color = {True: "#22a94c", False: "#c2c2c2", None: "#e0a02a"}[st["online"]]
         text = st["text"] + ("（{}）".format(st["version"]) if st["version"] else "")
-        self.after(0, self._update_container_ui, color, text)
+        healthy = bool(st["online"]) and "healthy" in st["text"]
+        self.after(0, self._update_container_ui, color, text, st["online"], healthy)
 
-    def _update_container_ui(self, color, text):
+    def _update_container_ui(self, color, text, online, healthy):
+        """刷新状态灯，并按容器状态联动按钮可用性：
+           - 隧道按钮：容器在线即可用（隧道只是条通路，不要求 dsh 已就绪）
+           - 打开 DSH：需容器 healthy（healthcheck 通过 = dsh 真正可服务）"""
+        self._container_online = bool(online)
+        self._container_healthy = bool(healthy)
         self._draw_dot(self.dot_container, color)
         self.lbl_container.configure(text=text)
+        # 按钮联动
+        if online:
+            self.btn_tunnel.configure(state="normal")
+            self.btn_open.configure(state="normal" if healthy else "disabled")
+        else:
+            self.btn_tunnel.configure(state="disabled")
+            self.btn_open.configure(state="disabled")
+            # 容器没了（被外部停止/崩溃）→ 顺手断开隧道，避免死链
+            if self.tunnel.is_up:
+                threading.Thread(target=self._tunnel_stop_worker, daemon=True).start()
+        # 按钮文案提示等待原因
+        if online and not healthy:
+            self.btn_open.configure(text="dsh 启动中...")
+        else:
+            self.btn_open.configure(text="打开 DSH")
         if self._tray is not None:
             try:
                 self._tray.title = "dsh-switch - 容器: {}".format(text)
@@ -461,6 +492,9 @@ class App(tk.Tk):
 
     # ================================================== 隧道 ----
     def toggle_tunnel(self):
+        if not self._container_online:
+            core.log("容器未运行，隧道不可用（先启动容器）")
+            return
         if self.tunnel.is_up:
             self.btn_tunnel.configure(state="disabled")
             threading.Thread(target=self._tunnel_stop_worker, daemon=True).start()
@@ -492,11 +526,16 @@ class App(tk.Tk):
         else:
             self._draw_dot(self.dot_tunnel, "#c2c2c2")
             self.lbl_tunnel.configure(text="已停止")
-            self.btn_tunnel.configure(text="启动隧道", state="normal")
+            # 容器离线时按钮保持禁用（由巡检联动统一管理）
+            self.btn_tunnel.configure(text="启动隧道",
+                                      state="normal" if self._container_online else "disabled")
 
     # ================================================== 打开 DSH ----
     def open_dsh(self):
         def worker():
+            if not self._container_online:
+                core.log("容器未运行，请先启动容器")
+                return
             if not self.tunnel.is_up:
                 core.log("隧道未启动，自动拉起...")
                 err = self.tunnel.start()
@@ -505,6 +544,26 @@ class App(tk.Tk):
                     return
                 self.after(0, self._refresh_tunnel_dot)
                 time.sleep(0.5)
+            # 等 dsh 就绪：容器刚启动时 health 还是 starting，页面打不开
+            core.log("等待 dsh 就绪...")
+            deadline = time.time() + 90
+            ready = False
+            while time.time() < deadline:
+                try:
+                    s = socket.create_connection(
+                        ("127.0.0.1", int(self.cfg["port"])), timeout=3)
+                    s.sendall(b"GET / HTTP/1.0\r\n\r\n")
+                    data = s.recv(64)
+                    s.close()
+                    if data:            # 200/303/401 都算 dsh 已应答
+                        ready = True
+                        break
+                except Exception:
+                    pass
+                time.sleep(3)
+            if not ready:
+                core.log("dsh 迟迟未就绪（90 秒超时），请检查容器状态后重试")
+                return
             core.log("获取 dsh token...")
             token = self.ctl.fetch_token()
             if not token:
