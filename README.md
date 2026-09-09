@@ -30,6 +30,12 @@
 ## 快速开始
 
 1. 从 [Releases](../../releases) 下载 `dsh-switch-vX.X.X-win32.exe`（单文件，免安装）
+   - 国内下载加速（任选其一，在原链接前加代理前缀）：
+     ```
+     https://ghfast.top/https://github.com/dxfong/dsh-switch/releases/download/v1.0.0/dsh-switch-v1.0.0-win32.exe
+     https://gh-proxy.com/https://github.com/dxfong/dsh-switch/releases/download/v1.0.0/dsh-switch-v1.0.0-win32.exe
+     ```
+   - 也可克隆加速：`git clone https://ghfast.top/https://github.com/dxfong/dsh-switch.git`
 2. 首次打开在「部署」页填写：
    - 服务器地址、SSH 端口、用户名
    - 认证方式：密码 或 私钥文件
