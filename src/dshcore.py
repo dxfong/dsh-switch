@@ -242,6 +242,13 @@ class ServerCtl(object):
         out = self.run(cmd, timeout=60)
         return (out is not None), (out or "")
 
+    def has_container(self):
+        """容器是否存在（任意状态，含 Exited）——用于「已部署」判定，
+        与 is_deployed（要求 healthy）区分：停止的容器也必须能被启动。"""
+        out = self.run(
+            "docker ps -a --filter name=^/{0}$ --format '{{{{.Names}}}}'".format(self.cfg["container"]))
+        return bool(out)
+
     def is_deployed(self):
         """启动时的自动探测：容器存在且 healthy 视为已部署。"""
         st = self.container_status()

@@ -254,7 +254,7 @@ class App(tk.Tk):
             return
         try:
             core.save_config(self.cfg)
-            log("配置已保存到 " + core.config_path())
+            core.log("配置已保存到 " + core.config_path())
         except Exception as e:
             messagebox.showerror("dsh-switch", "保存失败: {}".format(e), parent=self)
 
@@ -302,19 +302,19 @@ class App(tk.Tk):
             pass
 
         self._set_deploy_state("deploying")
-        log("=" * 46)
-        log("开始部署 dsh（版本通道: {}）".format(self.cfg["version_channel"]))
+        core.log("=" * 46)
+        core.log("开始部署 dsh（版本通道: {}）".format(self.cfg["version_channel"]))
 
         def cb_step(text):
             self.after(0, lambda: self.lbl_deploy.configure(text=text))
-            log(text)
+            core.log(text)
 
         def cb_line(text):
-            log("  " + text)
+            core.log("  " + text)
 
         def worker():
             ok, msg = self.deployer.deploy(cb_step, cb_line)
-            log(("✅ " if ok else "❌ ") + msg)
+            core.log(("✅ " if ok else "❌ ") + msg)
             self.after(0, self._deploy_done, ok, msg)
         threading.Thread(target=worker, daemon=True).start()
 
@@ -359,7 +359,8 @@ class App(tk.Tk):
         def worker():
             deployed = False
             try:
-                deployed = self.ctl.is_deployed()
+                # 只要有容器（含已停止）就算已部署，否则停止的容器会进不去控制台按钮
+                deployed = self.ctl.has_container()
             except Exception:
                 pass
             self.after(0, lambda: self._set_deploy_state(
@@ -408,11 +409,11 @@ class App(tk.Tk):
 
     def container_action(self, action):
         """启动/停止容器（后台线程，完成后立即刷新状态）。"""
-        log("{}容器 {}...".format("启动" if action == "start" else "停止",
+        core.log("{}容器 {}...".format("启动" if action == "start" else "停止",
                                   self.cfg["container"]))
         def worker():
             ok, out = self.ctl.container_action(action)
-            log("{}：{}".format("完成" if ok else "失败", out or "(无输出)"))
+            core.log("{}：{}".format("完成" if ok else "失败", out or "(无输出)"))
             self.after(0, self.poll_now)
         threading.Thread(target=worker, daemon=True).start()
 
@@ -471,15 +472,15 @@ class App(tk.Tk):
     def _tunnel_start_worker(self):
         err = self.tunnel.start()
         if err:
-            log("隧道启动失败: {}".format(err))
+            core.log("隧道启动失败: {}".format(err))
         else:
-            log("隧道已启动: localhost:{} -> {}:{}".format(
+            core.log("隧道已启动: localhost:{} -> {}:{}".format(
                 self.cfg["port"], self.cfg["host"], self.cfg["port"]))
         self.after(0, self._refresh_tunnel_dot)
 
     def _tunnel_stop_worker(self):
         self.tunnel.stop()
-        log("隧道已停止")
+        core.log("隧道已停止")
         self.after(0, self._refresh_tunnel_dot)
 
     def _refresh_tunnel_dot(self):
@@ -497,20 +498,20 @@ class App(tk.Tk):
     def open_dsh(self):
         def worker():
             if not self.tunnel.is_up:
-                log("隧道未启动，自动拉起...")
+                core.log("隧道未启动，自动拉起...")
                 err = self.tunnel.start()
                 if err:
-                    log("隧道启动失败: {}".format(err))
+                    core.log("隧道启动失败: {}".format(err))
                     return
                 self.after(0, self._refresh_tunnel_dot)
                 time.sleep(0.5)
-            log("获取 dsh token...")
+            core.log("获取 dsh token...")
             token = self.ctl.fetch_token()
             if not token:
-                log("未取到 token（容器可能没起来），请先检查容器状态")
+                core.log("未取到 token（容器可能没起来），请先检查容器状态")
                 return
             url = "http://localhost:{}/?token={}".format(self.cfg["port"], token)
-            log("打开 {}".format(url))
+            core.log("打开 {}".format(url))
             webbrowser.open(url)
         threading.Thread(target=worker, daemon=True).start()
 
@@ -549,7 +550,7 @@ class App(tk.Tk):
                 self.after(4000, lambda: self._tray.remove_notification())
         except Exception:
             pass
-        log("窗口已收进托盘（程序继续运行）")
+        core.log("窗口已收进托盘（程序继续运行）")
 
     def _show_window(self):
         self.deiconify()
@@ -561,7 +562,7 @@ class App(tk.Tk):
         self.lift()
 
     def _exit_all(self):
-        log("退出：断开隧道并结束程序")
+        core.log("退出：断开隧道并结束程序")
         self.tunnel.stop()
         if self._tray is not None:
             try:
@@ -582,23 +583,33 @@ def re_fullmatch(s, pattern):
 
 # ============================================================ 自检 ----
 def selftest():
-    """无 UI 自检：容器巡检 / token / 隧道启停（使用已保存的 dsh-switch.json）。"""
+    """无 UI 自检：容器巡检 / token / 隧道启停（使用已保存的 dsh-switch.json）。
+
+    所有探测步骤都兜异常：容器停止、上游拒连属正常状态，打印结论而非崩溃。
+    """
     cfg = core.load_config()
     if not cfg.get("host"):
         print("no config, nothing to test")
         return 1
     ctl = core.ServerCtl(cfg)
-    print("container:", ctl.container_status())
+    st = ctl.container_status()
+    print("container:", st)
     token = ctl.fetch_token()
     print("token:", (token[:8] + "...") if token else None)
     t = core.Tunnel(cfg)
     err = t.start()
     print("tunnel start:", err or "ok")
+    if err:
+        return 1
     time.sleep(1)
-    s = socket.create_connection(("127.0.0.1", int(cfg["port"])), timeout=5)
-    s.sendall(b"GET / HTTP/1.0\r\n\r\n")
-    print("tunnel probe:", s.recv(64)[:32])
-    s.close()
+    try:
+        s = socket.create_connection(("127.0.0.1", int(cfg["port"])), timeout=5)
+        s.sendall(b"GET / HTTP/1.0\r\n\r\n")
+        print("tunnel probe:", s.recv(64)[:32])
+        s.close()
+    except Exception as e:
+        # 容器停止 / 上游拒连时走到这里，属预期状态而非崩溃
+        print("tunnel probe failed (容器未启动? 被上游拒绝?):", e)
     t.stop()
     print("tunnel stopped:", not t.is_up)
     return 0
