@@ -347,10 +347,9 @@ class App(tk.Tk):
         elif state == "failed":
             self.btn_deploy.configure(text="重试部署", state="normal")
             self.btn_deploy.pack(side="left", padx=8, after=self.btn_test)
-        # 容器启停按钮只在已部署态可用
+        # 容器启停按钮只在已部署态可用（文案由巡检按实际状态刷新）
         deployed = state == "deployed"
-        self.btn_start_c.configure(state="normal" if deployed else "disabled")
-        self.btn_stop_c.configure(state="normal" if deployed else "disabled")
+        self.btn_container.configure(state="normal" if deployed else "disabled")
 
     def _startup_probe(self):
         """启动时自动探测已部署状态（有配置才探测）。"""
@@ -391,12 +390,11 @@ class App(tk.Tk):
 
         bf = ttk.Frame(f)
         bf.pack(fill="x", pady=(12, 0))
-        self.btn_start_c = ttk.Button(bf, text="启动容器", command=lambda: self.container_action("start"),
-                                      width=11, state="disabled")
-        self.btn_start_c.pack(side="left", padx=4)
-        self.btn_stop_c = ttk.Button(bf, text="停止容器", command=lambda: self.container_action("stop"),
-                                     width=11, state="disabled")
-        self.btn_stop_c.pack(side="left", padx=4)
+        # 启停合一：按钮文案随容器状态在「启动容器/停止容器」间切换
+        self.btn_container = ttk.Button(bf, text="启动容器",
+                                        command=self.toggle_container,
+                                        width=11, state="disabled")
+        self.btn_container.pack(side="left", padx=4)
         self.btn_tunnel = ttk.Button(bf, text="启动隧道", command=self.toggle_tunnel,
                                      width=11)
         self.btn_tunnel.pack(side="left", padx=4)
@@ -415,9 +413,15 @@ class App(tk.Tk):
         self.btn_tunnel.configure(state="disabled")
         self.btn_open.configure(state="disabled")
 
-    def container_action(self, action):
-        """启动/停止容器（后台线程，完成后立即刷新状态）。
-        停止容器时联动关闭隧道（隧道依赖容器内的 dsh，留着没有意义）。"""
+    def toggle_container(self):
+        """启停合一按钮：按巡检到的容器状态决定动作。
+        停止容器时联动关闭隧道；动作期间按钮禁用防连点。"""
+        if self.deploy_state != "deployed":
+            return
+        action = "stop" if self._container_online else "start"
+        self.btn_container.configure(
+            text="{}中...".format("停止" if action == "stop" else "启动"),
+            state="disabled")
         core.log("{}容器 {}...".format("启动" if action == "start" else "停止",
                                        self.cfg["container"]))
         def worker():
@@ -427,6 +431,8 @@ class App(tk.Tk):
                 self.tunnel.stop()
                 core.log("隧道已随容器停止而关闭")
                 self.after(0, self._refresh_tunnel_dot)
+            # 先恢复按钮可用（文案由随后的巡检按新状态刷新），再触发巡检
+            self.after(0, lambda: self.btn_container.configure(state="normal"))
             self.after(0, self.poll_now)
         threading.Thread(target=worker, daemon=True).start()
 
@@ -487,6 +493,13 @@ class App(tk.Tk):
             self.btn_open.configure(text="dsh 启动中...")
         else:
             self.btn_open.configure(text="打开 DSH")
+        # 启停合一按钮：仅在已部署且无动作进行中时跟随状态刷新文案
+        if self.deploy_state == "deployed":
+            if str(self.btn_container.cget("state")) != "disabled":
+                self.btn_container.configure(
+                    text="停止容器" if online else "启动容器")
+        else:
+            self.btn_container.configure(state="disabled")
         if self._tray is not None:
             try:
                 self._tray.title = "dsh-switch - 容器: {}".format(text)
